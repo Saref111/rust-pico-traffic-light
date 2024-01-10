@@ -95,9 +95,7 @@ fn main() -> ! {
     unsafe {
         pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
     }
-    info!("before loop");
     loop {
-        info!("in loop");
         cortex_m::asm::wfi();
     }
 }
