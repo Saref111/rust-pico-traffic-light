@@ -69,7 +69,7 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
+    let _ = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
 
     let pins = bsp::Pins::new(
         pac.IO_BANK0,
@@ -78,11 +78,11 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    let mut button = pins.gpio14.reconfigure();
-    let mut red_led = pins.gpio13.reconfigure();
-    let mut yellow_led = pins.gpio15.reconfigure();
-    let mut green_led = pins.gpio16.reconfigure();
-    let mut state = 0;
+    let button = pins.gpio14.reconfigure();
+    let red_led = pins.gpio13.reconfigure();
+    let yellow_led = pins.gpio15.reconfigure();
+    let green_led = pins.gpio16.reconfigure();
+    let state = 0;
 
     button.set_interrupt_enabled(InterruptEnum::EdgeLow, true);
 
@@ -133,7 +133,7 @@ fn IO_IRQ_BANK0() {
                 }
                 _ => {}
             }
-            *state = *state + 1;
+            *state += 1;
 
             if *state > 2 {
                 *state = 0;
