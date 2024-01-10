@@ -1,6 +1,3 @@
-//! Blinks the LED on a Pico board
-//!
-//! This will blink an LED attached to GP25, which is the pin the Pico uses for the on-board LED.
 #![no_std]
 #![no_main]
 
@@ -10,17 +7,45 @@ use defmt_rtt as _;
 use embedded_hal::digital::v2::OutputPin;
 use panic_probe as _;
 
-// Provide an alias for our BSP so we can switch targets quickly.
-// Uncomment the BSP you included in Cargo.toml, the rest of the code does not need to change.
 use rp_pico as bsp;
-// use sparkfun_pro_micro_rp2040 as bsp;
 
 use bsp::hal::{
     clocks::{init_clocks_and_plls, Clock},
+    gpio::Interrupt as InterruptEnum,
     pac,
+    pac::interrupt,
     sio::Sio,
     watchdog::Watchdog,
 };
+use core::cell::Cell;
+use critical_section::Mutex;
+
+type RedLedPin = bsp::hal::gpio::Pin<
+    bsp::hal::gpio::bank0::Gpio13,
+    bsp::hal::gpio::FunctionSioOutput,
+    bsp::hal::gpio::PullNone,
+>;
+
+type YellowLedPin = bsp::hal::gpio::Pin<
+    bsp::hal::gpio::bank0::Gpio15,
+    bsp::hal::gpio::FunctionSioOutput,
+    bsp::hal::gpio::PullNone,
+>;
+type GreenLedPin = bsp::hal::gpio::Pin<
+    bsp::hal::gpio::bank0::Gpio16,
+    bsp::hal::gpio::FunctionSioOutput,
+    bsp::hal::gpio::PullNone,
+>;
+
+type ButtonPin = bsp::hal::gpio::Pin<
+    bsp::hal::gpio::bank0::Gpio14,
+    bsp::hal::gpio::FunctionSioInput,
+    bsp::hal::gpio::PullUp,
+>;
+
+type ButtonAndState = (ButtonPin, RedLedPin, YellowLedPin, GreenLedPin, i32);
+
+static GLOBAL_STATE: Mutex<Cell<Option<ButtonAndState>>> = Mutex::new(Cell::new(None));
 
 #[entry]
 fn main() -> ! {
@@ -53,25 +78,67 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    // This is the correct pin on the Raspberry Pico board. On other boards, even if they have an
-    // on-board LED, it might need to be changed.
-    //
-    // Notably, on the Pico W, the LED is not connected to any of the RP2040 GPIOs but to the cyw43 module instead.
-    // One way to do that is by using [embassy](https://github.com/embassy-rs/embassy/blob/main/examples/rp/src/bin/wifi_blinky.rs)
-    //
-    // If you have a Pico W and want to toggle a LED with a simple GPIO output pin, you can connect an external
-    // LED to one of the GPIO pins, and reference that pin here. Don't forget adding an appropriate resistor
-    // in series with the LED.
-    let mut led_pin = pins.led.into_push_pull_output();
+    let mut button = pins.gpio14.reconfigure();
+    let mut red_led = pins.gpio13.reconfigure();
+    let mut yellow_led = pins.gpio15.reconfigure();
+    let mut green_led = pins.gpio16.reconfigure();
+    let mut state = 0;
 
+    button.set_interrupt_enabled(InterruptEnum::EdgeLow, true);
+
+    critical_section::with(|cs| {
+        GLOBAL_STATE
+            .borrow(cs)
+            .replace(Some((button, red_led, yellow_led, green_led, state)));
+    });
+
+    unsafe {
+        pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
+    }
+    info!("before loop");
     loop {
-        info!("on!");
-        led_pin.set_high().unwrap();
-        delay.delay_ms(500);
-        info!("off!");
-        led_pin.set_low().unwrap();
-        delay.delay_ms(500);
+        info!("in loop");
+        cortex_m::asm::wfi();
     }
 }
 
-// End of file
+#[interrupt]
+fn IO_IRQ_BANK0() {
+    static mut BUTTON_AND_STATE: Option<ButtonAndState> = None;
+
+    if BUTTON_AND_STATE.is_none() {
+        critical_section::with(|cs| {
+            *BUTTON_AND_STATE = GLOBAL_STATE.borrow(cs).take();
+        });
+    }
+
+    if let Some(bs) = BUTTON_AND_STATE {
+        let (button, red_led, yellow_led, green_led, state) = bs;
+        if button.interrupt_status(InterruptEnum::EdgeLow) {
+            match state {
+                0 => {
+                    red_led.set_high().unwrap();
+                    yellow_led.set_low().unwrap();
+                    green_led.set_low().unwrap();
+                }
+                1 => {
+                    red_led.set_low().unwrap();
+                    yellow_led.set_high().unwrap();
+                    green_led.set_low().unwrap();
+                }
+                2 => {
+                    red_led.set_low().unwrap();
+                    yellow_led.set_low().unwrap();
+                    green_led.set_high().unwrap();
+                }
+                _ => {}
+            }
+            *state = *state + 1;
+
+            if *state > 2 {
+                *state = 0;
+            }
+            button.clear_interrupt(InterruptEnum::EdgeLow);
+        }
+    }
+}
