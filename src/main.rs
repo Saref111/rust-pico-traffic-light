@@ -60,7 +60,7 @@ type ButtonAndState = (
 
 static GLOBAL_STATE: Mutex<Cell<Option<ButtonAndState>>> =
     Mutex::new(Cell::new(None));
-static DEBOUNCE_DELAY: u64 = 50;
+static DEBOUNCE_DELAY: u64 = 500;
 const MICROSECONDS_IN_SECOND: u64 = 1_000_000;
 
 #[entry]
