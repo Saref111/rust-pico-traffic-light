@@ -1,10 +1,7 @@
 #![no_std]
 #![no_main]
 
-use bsp::{
-    entry,
-    hal::clocks::{self, ClocksManager},
-};
+use bsp::entry;
 use defmt::*;
 use defmt_rtt as _;
 use embedded_hal::digital::v2::OutputPin;
@@ -23,7 +20,8 @@ use bsp::hal::{
 };
 use core::cell::Cell;
 use critical_section::Mutex;
-// use rp2040_hal::systick::SysTick;
+use debounced_pin::prelude::*;
+use debounced_pin::ActiveHigh;
 
 type RedLedPin = bsp::hal::gpio::Pin<
     bsp::hal::gpio::bank0::Gpio13,
@@ -42,26 +40,20 @@ type GreenLedPin = bsp::hal::gpio::Pin<
     bsp::hal::gpio::PullNone,
 >;
 
-type ButtonPin = bsp::hal::gpio::Pin<
-    bsp::hal::gpio::bank0::Gpio14,
-    bsp::hal::gpio::FunctionSioInput,
-    bsp::hal::gpio::PullUp,
+type ButtonPin = DebouncedInputPin<
+    bsp::hal::gpio::Pin<
+        bsp::hal::gpio::bank0::Gpio14,
+        bsp::hal::gpio::FunctionSioInput,
+        bsp::hal::gpio::PullUp,
+    >,
+    ActiveHigh,
 >;
 
-type ButtonAndState = (
-    ButtonPin,
-    RedLedPin,
-    YellowLedPin,
-    GreenLedPin,
-    i32,
-    Timer,
-    ClocksManager,
-);
+type ButtonAndState =
+    (ButtonPin, RedLedPin, YellowLedPin, GreenLedPin, i32);
 
 static GLOBAL_STATE: Mutex<Cell<Option<ButtonAndState>>> =
     Mutex::new(Cell::new(None));
-static DEBOUNCE_DELAY: u64 = 500;
-const MICROSECONDS_IN_SECOND: u64 = 1_000_000;
 
 #[entry]
 fn main() -> ! {
@@ -85,10 +77,9 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
-    let timer =
-        Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
+    let _timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
 
-    let _ = cortex_m::delay::Delay::new(
+    let _delay = cortex_m::delay::Delay::new(
         core.SYST,
         clocks.system_clock.freq().to_Hz(),
     );
@@ -101,20 +92,18 @@ fn main() -> ! {
     );
 
     let button = pins.gpio14.reconfigure();
+
     let red_led = pins.gpio13.reconfigure();
     let yellow_led = pins.gpio15.reconfigure();
     let green_led = pins.gpio16.reconfigure();
     let state = 0;
 
-    button.set_interrupt_enabled(
-        InterruptEnum::EdgeLow,
-        true,
-    );
+    button.set_interrupt_enabled(InterruptEnum::EdgeLow, true);
+    let button = DebouncedInputPin::new(button, ActiveHigh);
 
     critical_section::with(|cs| {
         GLOBAL_STATE.borrow(cs).replace(Some((
             button, red_led, yellow_led, green_led, state,
-            timer, clocks,
         )));
     });
 
@@ -128,71 +117,48 @@ fn main() -> ! {
 
 #[interrupt]
 fn IO_IRQ_BANK0() {
-    static mut BUTTON_AND_STATE: Option<ButtonAndState> =
-        None;
-    static mut LAST_INTERRUPT_TIME: Option<u64> = None;
+    static mut BUTTON_AND_STATE: Option<ButtonAndState> = None;
 
     if BUTTON_AND_STATE.is_none() {
         critical_section::with(|cs| {
-            *BUTTON_AND_STATE =
-                GLOBAL_STATE.borrow(cs).take();
+            *BUTTON_AND_STATE = GLOBAL_STATE.borrow(cs).take();
         });
     }
 
     if let Some(bs) = BUTTON_AND_STATE {
-        let (
-            button,
-            red_led,
-            yellow_led,
-            green_led,
-            state,
-            timer,
-            clocks,
-        ) = bs;
-        if button.interrupt_status(InterruptEnum::EdgeLow) {
-            let current_time =
-                get_current_time(&timer, &clocks);
-            if let Some(last_time) = *LAST_INTERRUPT_TIME {
-                if current_time - last_time < DEBOUNCE_DELAY
-                {
-                    // DEBOUNCE_DELAY is the debounce time you want to set
-                    return;
-                }
-            }
-            *LAST_INTERRUPT_TIME = Some(current_time);
-            match state {
-                0 => {
-                    red_led.set_high().unwrap();
-                    yellow_led.set_low().unwrap();
-                    green_led.set_low().unwrap();
-                }
-                1 => {
-                    red_led.set_low().unwrap();
-                    yellow_led.set_high().unwrap();
-                    green_led.set_low().unwrap();
-                }
-                2 => {
-                    red_led.set_low().unwrap();
-                    yellow_led.set_low().unwrap();
-                    green_led.set_high().unwrap();
-                }
-                _ => {}
-            }
-            *state += 1;
+        let (button, red_led, yellow_led, green_led, state) = bs;
 
-            if *state > 2 {
-                *state = 0;
+        match button.update().unwrap() {
+            DebounceState::Debouncing => return,
+            DebounceState::Reset => return,
+            DebounceState::NotActive => return,
+            DebounceState::Active => {
+                match state {
+                    0 => {
+                        red_led.set_high().unwrap();
+                        yellow_led.set_low().unwrap();
+                        green_led.set_low().unwrap();
+                    }
+                    1 => {
+                        red_led.set_low().unwrap();
+                        yellow_led.set_high().unwrap();
+                        green_led.set_low().unwrap();
+                    }
+                    2 => {
+                        red_led.set_low().unwrap();
+                        yellow_led.set_low().unwrap();
+                        green_led.set_high().unwrap();
+                    }
+                    _ => {}
+                }
+                *state += 1;
+
+                if *state > 2 {
+                    *state = 0;
+                }
+
+                button.pin.clear_interrupt(InterruptEnum::EdgeLow);
             }
-            button.clear_interrupt(InterruptEnum::EdgeLow);
         }
     }
-}
-
-fn get_current_time(
-    timer: &Timer,
-    clocks: &ClocksManager,
-) -> u64 {
-    let ticks = timer.get_counter().ticks();
-    let freq = clocks.system_clock.freq().to_Hz();
-    ticks as u64 * MICROSECONDS_IN_SECOND / freq as u64
 }

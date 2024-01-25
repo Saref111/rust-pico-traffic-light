@@ -1,5 +1,5 @@
 # .rustfmt.toml
-max_width = 60               # Set the maximum width of each line
+max_width = 70               # Set the maximum width of each line
 hard_tabs = false            # Use spaces, not tabs
 tab_spaces = 4               # Use 4 spaces per tab
 newline_style = "Auto"       # Use the appropriate line ending for the platform
